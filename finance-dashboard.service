@@ -1,0 +1,22 @@
+[Unit]
+Description=Finance Tracker Dashboard API
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/finance-tracker
+ExecStart=/usr/bin/python3 /home/ubuntu/finance-tracker/api_server.py
+Restart=always
+RestartSec=10s
+StartLimitInterval=60s
+StartLimitBurst=5
+StandardOutput=journal
+StandardError=journal
+
+Environment="PYTHONUNBUFFERED=1"
+Environment="FLASK_ENV=production"
+
+[Install]
+WantedBy=multi-user.target

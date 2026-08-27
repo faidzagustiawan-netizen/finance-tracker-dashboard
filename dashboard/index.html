@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Finance Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f172a;
+    color: #e2e8f0;
+    min-height: 100vh;
+  }
+  .header {
+    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+    padding: 24px;
+    border-bottom: 1px solid #334155;
+  }
+  .header h1 { font-size: 24px; color: #f8fafc; }
+  .header p { color: #94a3b8; font-size: 13px; margin-top: 4px; }
+  .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin-bottom: 24px; }
+  .card {
+    background: #1e293b;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #334155;
+    transition: transform 0.2s;
+  }
+  .card:hover { transform: translateY(-2px); }
+  .card-label { color: #94a3b8; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; }
+  .card-value { font-size: 28px; font-weight: 700; }
+  .card-sub { font-size: 12px; color: #64748b; margin-top: 4px; }
+  .green { color: #4ade80; }
+  .red { color: #f87171; }
+  .blue { color: #60a5fa; }
+  .yellow { color: #facc15; }
+  .panel {
+    background: #1e293b;
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid #334155;
+    margin-bottom: 24px;
+  }
+  .panel-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; color: #f1f5f9; }
+  .chart-container { position: relative; height: 300px; }
+  .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 768px) { .two-col { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #334155; font-size: 14px; }
+  th { color: #94a3b8; font-weight: 500; font-size: 12px; text-transform: uppercase; }
+  tr:hover { background: #253349; }
+  .badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+  .badge-income { background: rgba(74,222,128,0.15); color: #4ade80; }
+  .badge-expense { background: rgba(248,113,113,0.15); color: #f87171; }
+  .badge-owe { background: rgba(248,113,113,0.15); color: #f87171; }
+  .badge-recv { background: rgba(96,165,250,0.15); color: #60a5fa; }
+  .empty { text-align: center; color: #64748b; padding: 40px; }
+  .refresh-btn {
+    background: #3b82f6;
+    color: white;
+    border: none;
+    padding: 8px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    float: right;
+  }
+  .refresh-btn:hover { background: #2563eb; }
+  .loading { opacity: 0.5; }
+  .last-update { font-size: 11px; color: #64748b; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <div class="container" style="padding: 0;">
+    <h1>💰 Finance Dashboard</h1>
+    <p>Personal Finance Tracker — faidz.fun</p>
+  </div>
+</div>
+
+<div class="container">
+
+  <!-- Balance Cards -->
+  <div class="grid" id="balance-grid">
+    <div class="card">
+      <div class="card-label">💵 Pemasukan</div>
+      <div class="card-value green" id="income">Rp 0</div>
+      <div class="card-sub">Bulan ini</div>
+    </div>
+    <div class="card">
+      <div class="card-label">🛒 Pengeluaran</div>
+      <div class="card-value red" id="expense">Rp 0</div>
+      <div class="card-sub">Bulan ini</div>
+    </div>
+    <div class="card">
+      <div class="card-label">⚖️ Balance</div>
+      <div class="card-value blue" id="balance">Rp 0</div>
+      <div class="card-sub">Pemasukan − Pengeluaran</div>
+    </div>
+    <div class="card">
+      <div class="card-label">📊 Rasio Pengeluaran</div>
+      <div class="card-value yellow" id="ratio">0%</div>
+      <div class="card-sub">Dari total pemasukan</div>
+    </div>
+  </div>
+
+  <!-- Charts -->
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-title">📈 Pengeluaran per Kategori</div>
+      <div class="chart-container">
+        <canvas id="expenseChart"></canvas>
+      </div>
+    </div>
+    <div class="panel">
+      <div class="panel-title">🤝 Hutang & Piutang</div>
+      <div class="chart-container">
+        <canvas id="debtChart"></canvas>
+      </div>
+      <div class="last-update" id="debt-summary"></div>
+    </div>
+  </div>
+
+  <!-- Transactions -->
+  <div class="panel">
+    <div class="panel-title">
+      📝 Transaksi Terakhir
+      <button class="refresh-btn" onclick="loadAll()">🔄 Refresh</button>
+    </div>
+    <div id="transactions-table"></div>
+  </div>
+
+  <!-- Debts Table -->
+  <div class="panel">
+    <div class="panel-title">🤝 Hutang & Piutang Aktif</div>
+    <div id="debts-table"></div>
+  </div>
+
+  <div class="last-update" id="last-update"></div>
+</div>
+
+<script>
+const API_BASE = '/finance/api';
+let expenseChart = null, debtChart = null;
+
+function formatIDR(num) {
+  return 'Rp ' + Number(num).toLocaleString('id-ID');
+}
+
+function formatDate(dateStr) {
+  try {
+    const d = new Date(dateStr);
+    return d.toLocaleDateString('id-ID', { day: 'numeric', month: 'short', year: 'numeric' });
+  } catch(e) { return dateStr; }
+}
+
+async function api(path) {
+  const res = await fetch(API_BASE + path);
+  const data = await res.json();
+  if (data.status !== 'success') throw new Error(data.message);
+  return data.data;
+}
+
+async function loadBalance() {
+  const data = await api('/balance');
+  document.getElementById('income').textContent = formatIDR(data.income);
+  document.getElementById('expense').textContent = formatIDR(data.expense);
+  document.getElementById('balance').textContent = formatIDR(data.balance);
+}
+
+async function loadStats() {
+  const data = await api('/stats');
+  document.getElementById('ratio').textContent = data.expense_ratio.toFixed(1) + '%';
+}
+
+async function loadExpenses() {
+  const data = await api('/expenses');
+  const colors = ['#3b82f6', '#ef4444', '#f59e0b', '#10b981', '#8b5cf6', '#ec4899', '#14b8a6', '#f97316'];
+
+  if (expenseChart) expenseChart.destroy();
+  expenseChart = new Chart(document.getElementById('expenseChart'), {
+    type: 'doughnut',
+    data: {
+      labels: data.categories,
+      datasets: [{
+        data: data.amounts,
+        backgroundColor: colors.slice(0, data.categories.length),
+        borderWidth: 0
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 12 } },
+        tooltip: {
+          callbacks: { label: (ctx) => ctx.label + ': ' + formatIDR(ctx.raw) + ' (' + data.percentages[ctx.dataIndex].toFixed(1) + '%)' }
+        }
+      }
+    }
+  });
+}
+
+async function loadDebts() {
+  const data = await api('/debts');
+
+  if (debtChart) debtChart.destroy();
+  debtChart = new Chart(document.getElementById('debtChart'), {
+    type: 'bar',
+    data: {
+      labels: ['Saya Hutang', 'Piutang Saya'],
+      datasets: [{
+        data: [data.total_owe, data.total_receivable],
+        backgroundColor: ['#ef4444', '#60a5fa'],
+        borderWidth: 0,
+        borderRadius: 8
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: (ctx) => formatIDR(ctx.raw) } }
+      },
+      scales: {
+        y: { ticks: { color: '#94a3b8', callback: v => 'Rp ' + (v/1000) + 'k' }, grid: { color: '#334155' } },
+        x: { ticks: { color: '#94a3b8' }, grid: { display: false } }
+      }
+    }
+  });
+
+  const net = data.net_balance;
+  document.getElementById('debt-summary').innerHTML =
+    'Net: <strong class="' + (net >= 0 ? 'green' : 'red') + '">' + formatIDR(Math.abs(net)) +
+    (net >= 0 ? ' (bersih)' : ' (hutang)') + '</strong>';
+
+  // Debts table
+  const el = document.getElementById('debts-table');
+  if (!data.all_debts.length) {
+    el.innerHTML = '<div class="empty">Tidak ada hutang aktif 🎉</div>';
+    return;
+  }
+  let html = '<table><tr><th>Nama</th><th>Tipe</th><th>Jumlah</th><th>Catatan</th></tr>';
+  data.all_debts.forEach(d => {
+    const isOwe = d.type === 'owe';
+    html += '<tr><td>' + d.friend + '</td><td><span class="badge ' + (isOwe ? 'badge-owe' : 'badge-recv') + '">' +
+      (isOwe ? 'Saya → Teman' : 'Teman → Saya') + '</span></td><td>' + formatIDR(d.amount) + '</td><td>' +
+      (d.description || '-') + '</td></tr>';
+  });
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+async function loadTransactions() {
+  const data = await api('/transactions?limit=15');
+  const el = document.getElementById('transactions-table');
+  if (!data.transactions.length) {
+    el.innerHTML = '<div class="empty">Belum ada transaksi</div>';
+    return;
+  }
+  let html = '<table><tr><th>Tanggal</th><th>Deskripsi</th><th>Kategori</th><th>Tipe</th><th>Jumlah</th></tr>';
+  data.transactions.forEach(t => {
+    html += '<tr><td>' + formatDate(t.date) + '</td><td>' + (t.description || '-') + '</td><td>' +
+      t.category + '</td><td><span class="badge badge-' + t.type + '">' +
+      (t.type === 'income' ? 'Masuk' : 'Keluar') + '</span></td><td class="' +
+      (t.type === 'income' ? 'green' : 'red') + '">' +
+      (t.type === 'income' ? '+' : '-') + formatIDR(t.amount) + '</td></tr>';
+  });
+  html += '</table>';
+  el.innerHTML = html;
+}
+
+async function loadAll() {
+  try {
+    await Promise.all([loadBalance(), loadStats(), loadExpenses(), loadDebts(), loadTransactions()]);
+    document.getElementById('last-update').textContent =
+      'Update terakhir: ' + new Date().toLocaleString('id-ID');
+  } catch (e) {
+    console.error('Load error:', e);
+    document.getElementById('last-update').textContent = '⚠️ Error: ' + e.message;
+  }
+}
+
+loadAll();
+// Auto-refresh every 60s
+setInterval(loadAll, 60000);
+</script>
+</body>
+</html>
