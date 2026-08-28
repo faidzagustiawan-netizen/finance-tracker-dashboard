@@ -38,7 +38,9 @@ def health():
 def get_balance():
     """Get current balance (income - expense)"""
     try:
-        balance_data = tracker.get_balance()
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        balance_data = tracker.get_balance(start_date, end_date)
         return jsonify({
             'status': 'success',
             'data': {
@@ -58,15 +60,18 @@ def get_balance():
 
 @app.route('/api/expenses', methods=['GET'])
 def get_expenses():
-    """Get expenses breakdown by category (current month)"""
+    """Get expenses breakdown by category"""
     try:
-        month = request.args.get('month')  # Format: YYYY-MM
-        expenses = tracker.get_expense_by_category(month)
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        expenses = tracker.get_expense_by_category(start_date, end_date)
         
         # Format untuk chart
-        categories = [e['category'] for e in expenses]
-        amounts = [e['total'] for e in expenses]
-        percentages = [e['percentage'] for e in expenses]
+        categories = [e.get('name', '') for e in expenses]
+        amounts = [e.get('total', 0) for e in expenses]
+        
+        total_amount = sum(amounts)
+        percentages = [round((a / total_amount * 100), 2) for a in amounts] if total_amount > 0 else []
         
         return jsonify({
             'status': 'success',
@@ -75,9 +80,10 @@ def get_expenses():
                 'categories': categories,
                 'amounts': amounts,
                 'percentages': percentages,
-                'total': sum(amounts),
+                'total': total_amount,
                 'count': len(expenses),
-                'month': month or datetime.now().strftime('%Y-%m')
+                'start_date': start_date,
+                'end_date': end_date
             }
         })
     except Exception as e:
@@ -89,22 +95,35 @@ def get_transactions():
     try:
         limit = request.args.get('limit', 50, type=int)
         trans_type = request.args.get('type')  # 'income', 'expense', or None (all)
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
         
         conn = tracker.get_connection()
         cursor = conn.cursor()
         
-        # Query with category name JOIN
+        # Query with category name and account JOIN
         base_query = """
-        SELECT t.id, t.amount, COALESCE(t.description, ''), c.name, t.date, t.type
+        SELECT t.id, t.amount, COALESCE(t.description, ''), c.name, t.date, t.type,
+               t.account_id, COALESCE(a.name, 'Cash') as account_name
         FROM transactions t
         LEFT JOIN categories c ON t.category_id = c.id
+        LEFT JOIN accounts a ON t.account_id = a.id
+        WHERE 1=1
         """
         
+        params = []
         if trans_type:
-            base_query += f" WHERE t.type = ?"
-            cursor.execute(base_query + " ORDER BY t.date DESC LIMIT ?", (trans_type, limit))
-        else:
-            cursor.execute(base_query + " ORDER BY t.date DESC LIMIT ?", (limit,))
+            base_query += " AND t.type = ?"
+            params.append(trans_type)
+            
+        if start_date and end_date:
+            base_query += " AND t.date BETWEEN ? AND ?"
+            params.extend([start_date, end_date])
+            
+        base_query += " ORDER BY t.date DESC LIMIT ?"
+        params.append(limit)
+        
+        cursor.execute(base_query, params)
         
         rows = cursor.fetchall()
         
@@ -116,7 +135,9 @@ def get_transactions():
                 'description': row[2],
                 'category': row[3] or 'N/A',
                 'date': row[4],
-                'type': row[5]
+                'type': row[5],
+                'account_id': row[6],
+                'account_name': row[7]
             })
         
         conn.close()
@@ -198,8 +219,11 @@ def get_friend_debt(friend_name):
 def get_summary():
     """Get complete financial summary"""
     try:
-        balance = tracker.get_balance()
-        expenses = tracker.get_expense_by_category()
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        balance = tracker.get_balance(start_date, end_date)
+        expenses = tracker.get_expense_by_category(start_date, end_date)
         debts = tracker.get_all_pending_debts()
         
         owe = [d for d in debts if d['type'] == 'owe']
@@ -233,8 +257,11 @@ def get_summary():
 def get_stats():
     """Get financial statistics"""
     try:
-        balance = tracker.get_balance()
-        expenses = tracker.get_expense_by_category()
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        balance = tracker.get_balance(start_date, end_date)
+        expenses = tracker.get_expense_by_category(start_date, end_date)
         
         if expenses:
             top_category = max(expenses, key=lambda x: x['total'])
@@ -255,6 +282,115 @@ def get_stats():
                 'categories_count': len(expenses)
             }
         })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ─────────────────────────────────────────────
+# Account Endpoints
+# ─────────────────────────────────────────────
+
+@app.route('/api/accounts', methods=['GET'])
+def get_accounts():
+    """Get all accounts with balances"""
+    try:
+        start_date = request.args.get('start_date')
+        end_date = request.args.get('end_date')
+        
+        accounts = tracker.get_accounts()
+        balances = tracker.get_account_balances(start_date, end_date)
+        # Merge balance into account data
+        balance_map = {b['account_id']: b for b in balances}
+        result = []
+        for a in accounts:
+            bal = balance_map.get(a['id'], {})
+            result.append({
+                'id': a['id'],
+                'name': a['name'],
+                'type': a['type'],
+                'icon': a['icon'],
+                'color': a['color'],
+                'income': bal.get('income', 0),
+                'expense': bal.get('expense', 0),
+                'balance': bal.get('income', 0) - bal.get('expense', 0)
+            })
+        return jsonify({'status': 'success', 'data': result})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/categories', methods=['GET'])
+def get_categories():
+    try:
+        trans_type = request.args.get('type')
+        cats = tracker.get_categories(trans_type)
+        return jsonify({'status': 'success', 'data': cats})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+# ─────────────────────────────────────────────
+# CRUD & Chat Endpoints
+# ─────────────────────────────────────────────
+
+from command_handler import FinanceCommandHandler
+cmd_handler = FinanceCommandHandler("finance.db")
+
+@app.route('/api/chat', methods=['POST'])
+def chat_input():
+    """Handle natural language input via dashboard"""
+    try:
+        data = request.json
+        if not data or 'text' not in data:
+            return jsonify({'status': 'error', 'message': 'Text required'}), 400
+        
+        force = data.get('force', False)
+        response = cmd_handler.handle_message(data['text'], force)
+        
+        if isinstance(response, dict) and response.get('action') == 'confirm':
+            return jsonify({
+                'status': 'confirm',
+                'data': response
+            })
+            
+        return jsonify({
+            'status': 'success',
+            'data': {
+                'response': response
+            }
+        })
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/transactions/<int:tx_id>', methods=['DELETE'])
+def delete_transaction(tx_id):
+    """Delete a transaction"""
+    try:
+        conn = tracker.get_connection()
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM transactions WHERE id = ?", (tx_id,))
+        conn.commit()
+        conn.close()
+        return jsonify({'status': 'success'})
+    except Exception as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+@app.route('/api/transactions/<int:tx_id>', methods=['PUT'])
+def update_transaction(tx_id):
+    """Update a transaction"""
+    try:
+        data = request.json
+        if not data:
+            return jsonify({'status': 'error', 'message': 'No data'}), 400
+        success = tracker.update_transaction(
+            tx_id,
+            amount=data.get('amount'),
+            description=data.get('description'),
+            category_name=data.get('category'),
+            account_id=data.get('account_id'),
+            date=data.get('date')
+        )
+        if success:
+            return jsonify({'status': 'success'})
+        else:
+            return jsonify({'status': 'error', 'message': 'Transaction not found'}), 404
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 

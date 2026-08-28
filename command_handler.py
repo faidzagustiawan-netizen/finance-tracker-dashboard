@@ -7,10 +7,10 @@ class FinanceCommandHandler:
     def __init__(self, db_path: str = "finance.db"):
         self.tracker = FinanceTracker(db_path)
     
-    def handle_message(self, text: str) -> str:
+    def handle_message(self, text: str, force: bool = False):
         """
         Parse dan handle pesan dari WhatsApp
-        Return: response message
+        Return: response message or confirm dict
         """
         text = text.strip()
         
@@ -19,7 +19,7 @@ class FinanceCommandHandler:
             return self.handle_command(text)
         
         # Natural language input
-        return self.handle_natural_input(text)
+        return self.handle_natural_input(text, force)
     
     def handle_command(self, text: str) -> str:
         """Handle /command format"""
@@ -45,18 +45,10 @@ class FinanceCommandHandler:
         else:
             return "❌ Perintah tidak dikenal. Ketik /help untuk melihat bantuan."
     
-    def handle_natural_input(self, text: str) -> str:
+    def handle_natural_input(self, text: str, force: bool = False):
         """
         Handle natural language input
-        Contoh:
-        - "25rb makanan"
-        - "jajan 50k"
-        - "gajian 5jt sumber: freelance"
-        - "hutang ke budi 100rb makan bareng"
-        - "budi hutang ke saya 50rb kopi"
-        - "bayar hutang ke budi 50rb"
         """
-        
         # Deteksi pembayaran hutang DULU (karena mengandung kata "hutang")
         payment_match = re.search(r'bayar\s+(.*\s)?hutang', text, re.IGNORECASE)
         if payment_match:
@@ -68,9 +60,9 @@ class FinanceCommandHandler:
             return self.parse_debt_input(text)
         
         # Transaksi biasa
-        return self.parse_transaction_input(text)
+        return self.parse_transaction_input(text, force)
     
-    def parse_transaction_input(self, text: str) -> str:
+    def parse_transaction_input(self, text: str, force: bool = False):
         """Parse normal transaction input"""
         parsed = self.tracker.parse_transaction_input(text)
         
@@ -81,6 +73,7 @@ class FinanceCommandHandler:
         trans_type = parsed['type']
         category_hint = parsed['category_hint']
         description = parsed['description']
+        account_id = parsed.get('account_id')
         
         # Deteksi kategori
         if trans_type == 'income':
@@ -88,11 +81,19 @@ class FinanceCommandHandler:
             if not category:
                 category = "Lainnya (Pemasukan)"
             
+            if not force and category == "Lainnya (Pemasukan)" and not account_id:
+                return {
+                    "action": "confirm",
+                    "message": f"Kategori tidak terdeteksi jelas (masuk 'Lainnya (Pemasukan)') dan tujuan masuk ke 'Cash'.\nLanjutkan simpan Pemasukan Rp {amount:,} ini?\nAtau klik 'Batal' dan ketik lebih jelas.",
+                    "text": text
+                }
+            
             try:
                 success = self.tracker.add_income(
                     amount=amount,
                     source=description,
                     category=category,
+                    account_id=account_id,
                     date=datetime.now().strftime("%Y-%m-%d")
                 )
                 
@@ -108,11 +109,19 @@ class FinanceCommandHandler:
             if not category:
                 category = "Lainnya"
             
+            if not force and category == "Lainnya" and not account_id:
+                return {
+                    "action": "confirm",
+                    "message": f"Kategori tidak terdeteksi (masuk 'Lainnya') dan terpotong dari 'Cash'.\nLanjutkan simpan Pengeluaran Rp {amount:,} ini?\nAtau klik 'Batal' dan ketik lebih spesifik (contoh: 'makan 50rb gopay').",
+                    "text": text
+                }
+            
             try:
                 success = self.tracker.add_expense(
                     amount=amount,
                     category=category,
                     description=description,
+                    account_id=account_id,
                     date=datetime.now().strftime("%Y-%m-%d")
                 )
                 

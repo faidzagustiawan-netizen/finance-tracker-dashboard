@@ -18,11 +18,57 @@ class FinanceTracker:
             
             # Baca schema dari file
             schema_path = Path(__file__).parent / "schema.sql"
-            with open(schema_path, 'r') as f:
+            with open(schema_path, 'r', encoding='utf-8') as f:
                 cursor.executescript(f.read())
             
             conn.commit()
             conn.close()
+        self.migrate_db()
+        
+    def migrate_db(self):
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        
+        # Add account_id column to transactions if not exists
+        cursor.execute("PRAGMA table_info(transactions)")
+        columns = [info['name'] for info in cursor.fetchall()]
+        if 'account_id' not in columns:
+            cursor.execute("ALTER TABLE transactions ADD COLUMN account_id INTEGER REFERENCES accounts(id)")
+        
+        # Create accounts table if not exists
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='accounts'")
+        if not cursor.fetchone():
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS accounts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                type TEXT NOT NULL CHECK(type IN ('bank', 'ewallet', 'cash')),
+                icon TEXT DEFAULT '',
+                color TEXT DEFAULT '#3b82f6',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+            """)
+            
+            default_accounts = [
+                ('Cash', 'cash', '💵', '#22c55e'),
+                ('BRI', 'bank', '🏦', '#1d4ed8'),
+                ('ShopeePay', 'ewallet', '🟠', '#f97316'),
+                ('GoPay', 'ewallet', '🟢', '#22d3ee'),
+                ('SeaBank', 'bank', '🌊', '#0ea5e9')
+            ]
+            cursor.executemany(
+                "INSERT OR IGNORE INTO accounts (name, type, icon, color) VALUES (?, ?, ?, ?)",
+                default_accounts
+            )
+        
+        # Create index after column is ensured
+        try:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id)")
+        except Exception:
+            pass
+                
+        conn.commit()
+        conn.close()
     
     def get_connection(self):
         """Get database connection"""
@@ -32,7 +78,7 @@ class FinanceTracker:
     
     # ==================== TRANSAKSI ====================
     
-    def add_expense(self, amount: int, category: str, description: str = "", date: Optional[str] = None) -> bool:
+    def add_expense(self, amount: int, category: str, description: str = "", date: Optional[str] = None, account_id: Optional[int] = None) -> bool:
         """
         Tambah pengeluaran
         amount: dalam Rupiah (integer)
@@ -54,16 +100,22 @@ class FinanceTracker:
             
             category_id = result[0]
             
-            cursor.execute(
-                "INSERT INTO transactions (amount, type, category_id, description, date) VALUES (?, ?, ?, ?, ?)",
-                (amount, 'expense', category_id, description, date)
-            )
+            if account_id is not None:
+                cursor.execute(
+                    "INSERT INTO transactions (amount, type, category_id, description, date, account_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (amount, 'expense', category_id, description, date, account_id)
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO transactions (amount, type, category_id, description, date) VALUES (?, ?, ?, ?, ?)",
+                    (amount, 'expense', category_id, description, date)
+                )
             conn.commit()
             return True
         finally:
             conn.close()
     
-    def add_income(self, amount: int, source: str, category: str = "Lainnya (Pemasukan)", date: Optional[str] = None) -> bool:
+    def add_income(self, amount: int, source: str, category: str = "Lainnya (Pemasukan)", date: Optional[str] = None, account_id: Optional[int] = None) -> bool:
         """
         Tambah pemasukan
         amount: dalam Rupiah
@@ -86,10 +138,16 @@ class FinanceTracker:
             category_id = result[0]
             
             # Insert transaction
-            cursor.execute(
-                "INSERT INTO transactions (amount, type, category_id, description, date) VALUES (?, ?, ?, ?, ?)",
-                (amount, 'income', category_id, source, date)
-            )
+            if account_id is not None:
+                cursor.execute(
+                    "INSERT INTO transactions (amount, type, category_id, description, date, account_id) VALUES (?, ?, ?, ?, ?, ?)",
+                    (amount, 'income', category_id, source, date, account_id)
+                )
+            else:
+                cursor.execute(
+                    "INSERT INTO transactions (amount, type, category_id, description, date) VALUES (?, ?, ?, ?, ?)",
+                    (amount, 'income', category_id, source, date)
+                )
             transaction_id = cursor.lastrowid
             
             # Insert income source
@@ -99,6 +157,80 @@ class FinanceTracker:
             )
             conn.commit()
             return True
+        finally:
+            conn.close()
+            
+    def update_transaction(self, tx_id: int, amount: Optional[int] = None, description: Optional[str] = None, category_name: Optional[str] = None, account_id: Optional[int] = None, date: Optional[str] = None) -> bool:
+        conn = self.get_connection()
+        cursor = conn.cursor()
+        try:
+            # Check if transaction exists
+            cursor.execute("SELECT id, type FROM transactions WHERE id = ?", (tx_id,))
+            tx = cursor.fetchone()
+            if not tx:
+                return False
+                
+            tx_type = tx['type']
+            
+            updates = []
+            params = []
+            
+            if amount is not None:
+                updates.append("amount = ?")
+                params.append(amount)
+            if description is not None:
+                updates.append("description = ?")
+                params.append(description)
+            if date is not None:
+                updates.append("date = ?")
+                params.append(date)
+            if account_id is not None:
+                updates.append("account_id = ?")
+                params.append(account_id)
+            if category_name is not None:
+                cursor.execute("SELECT id FROM categories WHERE name = ? AND type = ?", (category_name, tx_type))
+                cat = cursor.fetchone()
+                if cat:
+                    updates.append("category_id = ?")
+                    params.append(cat[0])
+            
+            if updates:
+                query = f"UPDATE transactions SET {', '.join(updates)} WHERE id = ?"
+                params.append(tx_id)
+                cursor.execute(query, params)
+                conn.commit()
+            return True
+        finally:
+            conn.close()
+            
+    def get_accounts(self) -> List[Dict]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM accounts ORDER BY created_at")
+            return [dict(row) for row in cursor.fetchall()]
+        finally:
+            conn.close()
+            
+    def get_account_balances(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict]:
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            query = """
+                SELECT 
+                    account_id,
+                    SUM(CASE WHEN type = 'income' THEN amount ELSE 0 END) as income,
+                    SUM(CASE WHEN type = 'expense' THEN amount ELSE 0 END) as expense
+                FROM transactions
+            """
+            params = []
+            if start_date and end_date:
+                query += " WHERE date BETWEEN ? AND ?"
+                params.extend([start_date, end_date])
+            
+            query += " GROUP BY account_id"
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
         finally:
             conn.close()
     
@@ -132,6 +264,31 @@ class FinanceTracker:
         remaining = text[:match.start()] + text[match.end():]
         remaining = remaining.strip()
         
+        # Deteksi akun
+        accounts = self.get_accounts()
+        account_id = None
+        
+        accounts.sort(key=lambda x: len(x['name']), reverse=True)
+        
+        for acc in accounts:
+            name_lower = acc['name'].lower()
+            if name_lower in remaining:
+                account_id = acc['id']
+                remaining = remaining.replace(name_lower, '').strip()
+                break
+                
+        # Alias khusus untuk shopeepay
+        if not account_id and 'spay' in remaining:
+            for acc in accounts:
+                if acc['name'].lower() == 'shopeepay':
+                    account_id = acc['id']
+                    remaining = remaining.replace('spay', '').strip()
+                    break
+                    
+        # Bersihkan kata sambung
+        remaining = re.sub(r'\b(?:di|ke|masuk|dompet)\b', '', remaining).strip()
+        remaining = re.sub(r'\s+', ' ', remaining)
+        
         # Deteksi tipe (income/expense)
         income_keywords = ['gajian', 'gaji', 'freelance', 'bonus', 'proyek', 'project', 'dapat']
         is_income = any(kw in remaining for kw in income_keywords)
@@ -148,7 +305,8 @@ class FinanceTracker:
             'type': 'income' if is_income else 'expense',
             'category_hint': remaining,
             'description': remaining,
-            'source': source
+            'source': source,
+            'account_id': account_id
         }
     
     # ==================== HUTANG-PIUTANG ====================
@@ -285,19 +443,14 @@ class FinanceTracker:
         finally:
             conn.close()
     
-    def get_expense_by_category(self, month: Optional[str] = None) -> List[Dict]:
-        """Pengeluaran per kategori untuk bulan tertentu"""
-        if not month:
-            month = datetime.now().strftime("%Y-%m")
+    def get_expense_by_category(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict]:
+        """Pengeluaran per kategori untuk range waktu tertentu"""
+        if not start_date:
+            today = datetime.now()
+            start_date = today.replace(day=1).strftime("%Y-%m-%d")
         
-        start_date = f"{month}-01"
-        
-        # Hitung hari terakhir bulan
-        year, month_num = map(int, month.split('-'))
-        if month_num == 12:
-            end_date = f"{year + 1}-01-01"
-        else:
-            end_date = f"{year}-{month_num + 1:02d}-01"
+        if not end_date:
+            end_date = datetime.now().strftime("%Y-%m-%d")
         
         conn = self.get_connection()
         cursor = conn.cursor()
@@ -307,7 +460,7 @@ class FinanceTracker:
                 SELECT c.name, SUM(t.amount) as total 
                 FROM transactions t
                 JOIN categories c ON t.category_id = c.id
-                WHERE t.type = 'expense' AND t.date >= ? AND t.date < ?
+                WHERE t.type = 'expense' AND t.date BETWEEN ? AND ?
                 GROUP BY c.name
                 ORDER BY total DESC
             """, (start_date, end_date))

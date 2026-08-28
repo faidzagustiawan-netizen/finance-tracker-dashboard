@@ -14,10 +14,12 @@ CREATE TABLE IF NOT EXISTS transactions (
     amount INTEGER NOT NULL,
     type TEXT NOT NULL CHECK(type IN ('income', 'expense')),
     category_id INTEGER,
+    account_id INTEGER,
     description TEXT,
     date DATE NOT NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(category_id) REFERENCES categories(id)
+    FOREIGN KEY(category_id) REFERENCES categories(id),
+    FOREIGN KEY(account_id) REFERENCES accounts(id)
 );
 
 -- Pemasukan (dengan sumber)
@@ -71,3 +73,23 @@ CREATE INDEX IF NOT EXISTS idx_transactions_date ON transactions(date);
 CREATE INDEX IF NOT EXISTS idx_transactions_type ON transactions(type);
 CREATE INDEX IF NOT EXISTS idx_debts_friend ON debts(friend_name);
 CREATE INDEX IF NOT EXISTS idx_debts_status ON debts(status);
+
+-- Rekening / Dompet
+CREATE TABLE IF NOT EXISTS accounts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    type TEXT NOT NULL CHECK(type IN ('bank', 'ewallet', 'cash')),
+    icon TEXT DEFAULT '',
+    color TEXT DEFAULT '#3b82f6',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Default accounts
+INSERT OR IGNORE INTO accounts (name, type, icon, color) VALUES
+('Cash', 'cash', '💵', '#22c55e'),
+('BRI', 'bank', '🏦', '#1d4ed8'),
+('ShopeePay', 'ewallet', '🟠', '#f97316'),
+('GoPay', 'ewallet', '🟢', '#22d3ee'),
+('SeaBank', 'bank', '🌊', '#0ea5e9');
+
+CREATE INDEX IF NOT EXISTS idx_transactions_account ON transactions(account_id);
