@@ -11,6 +11,8 @@ from command_handler import FinanceCommandHandler
 from whatsapp_voice_handler import WhatsAppVoiceHandler
 from datetime import datetime, timedelta
 import json
+import os
+import subprocess
 
 app = Flask(__name__)
 CORS(app)
@@ -19,6 +21,14 @@ CORS(app)
 tracker = FinanceTracker("finance.db")
 command_handler = FinanceCommandHandler("finance.db")
 voice_handler = WhatsAppVoiceHandler("finance.db")
+
+# ─────────────────────────────────────────────
+# Prometheus metrics
+# ─────────────────────────────────────────────
+
+# The pre-existing /metrics route further down this file now runs (see the note
+# where the __main__ block used to be), so it is used as-is rather than defining
+# a second route for the same path.
 
 # ─────────────────────────────────────────────
 # Health Check
@@ -590,65 +600,17 @@ def handle_whatsapp_voice():
 # Monitoring Alerts - WhatsApp Webhook
 # ─────────────────────────────────────────────
 
-@app.route('/api/alert/whatsapp', methods=['POST'])
-def alert_whatsapp():
-    """
-    Receive Prometheus/AlertManager alerts and send via WhatsApp
-    """
-    try:
-        data = request.get_json()
-        alerts = data.get('alerts', [])
-        
-        if not alerts:
-            return jsonify({'status': 'success', 'message': 'No alerts'}), 200
-        
-        # Format alert message
-        messages = []
-        for alert in alerts:
-            status = alert.get('status', 'unknown')
-            labels = alert.get('labels', {})
-            annotations = alert.get('annotations', {})
-            
-            alert_name = labels.get('alertname', 'Unknown Alert')
-            summary = annotations.get('summary', 'No summary')
-            description = annotations.get('description', '')
-            
-            emoji = '🔴' if status == 'firing' else '🟢'
-            msg = f"{emoji} *{alert_name}*\n{summary}\n{description}"
-            messages.append(msg)
-        
-        alert_msg = "\n\n".join(messages)
-        
-        # Send via Hermes WhatsApp
-        import subprocess
-        cmd = f'hermes send --to whatsapp:62895397133738 "{alert_msg}"'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        
-        return jsonify({
-            'status': 'success',
-            'message': 'Alert sent',
-            'alerts_count': len(alerts)
-        })
-    
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+# A second, unauthenticated handler for this same path used to live here. Flask
+# matches the first registered rule, so it shadowed the authenticated handler
+# below and let anyone who could reach the port fire WhatsApp messages -- and it
+# interpolated alert text straight into a shell command. The authenticated
+# handler is the only one now.
 
-if __name__ == '__main__':
-    print("🚀 Finance Tracker API Server")
-    print("📊 Running on http://127.0.0.1:5000")
-    print("📍 Endpoints:")
-    print("   GET  /health")
-    print("   GET  /api/balance")
-    print("   GET  /api/expenses")
-    print("   GET  /api/transactions")
-    print("   GET  /api/debts")
-    print("   GET  /api/debts/<friend_name>")
-    print("   GET  /api/summary")
-    print("   GET  /api/stats")
-    print("")
-    
-    # Run on all interfaces, port 5000
-    app.run(host='127.0.0.1', port=5000, debug=False)
+# The __main__ block used to sit here, in the middle of the file. Everything
+# below it -- the Prometheus endpoint, the alert webhook, the cached routes and
+# the receipt OCR routes -- therefore ran only when this file was imported, never
+# in the running service, so those 7 routes silently 404'd in production. It now
+# lives at the very bottom, after every route is registered.
 
 # ─────────────────────────────────────────────
 # Prometheus Metrics
@@ -673,7 +635,30 @@ def prometheus_metrics():
         
         cursor.execute("SELECT COUNT(*) FROM debts")
         debt_count = cursor.fetchone()[0]
-        
+
+        cursor.execute("SELECT COUNT(*) FROM accounts")
+        account_count = cursor.fetchone()[0]
+
+        cursor.execute(
+            "SELECT COALESCE(SUM(amount),0) FROM transactions "
+            "WHERE type='expense' AND date=date('now','localtime')"
+        )
+        today_expense = cursor.fetchone()[0]
+
+        cursor.execute("""
+            SELECT COALESCE(c.name,'uncategorised'), SUM(t.amount)
+            FROM transactions t LEFT JOIN categories c ON t.category_id=c.id
+            WHERE t.type='expense' GROUP BY c.name
+        """)
+        by_category = cursor.fetchall()
+
+        cursor.execute("""
+            SELECT t.id, t.name, COALESCE(SUM(x.amount),0)
+            FROM trips t LEFT JOIN transactions x ON x.trip_id=t.id AND x.type='expense'
+            WHERE t.status='active' GROUP BY t.id, t.name
+        """)
+        active_trips = cursor.fetchall()
+
         balance = income - expense
         
         conn.close()
@@ -695,10 +680,40 @@ finance_expense_total {expense}
 # TYPE finance_balance gauge
 finance_balance {balance}
 
+# HELP finance_expense_today Rupiah spent today (local time)
+# TYPE finance_expense_today gauge
+finance_expense_today {today_expense}
+
+# HELP finance_accounts_total Number of accounts
+# TYPE finance_accounts_total gauge
+finance_accounts_total {account_count}
+
 # HELP finance_debts_total Total debts
 # TYPE finance_debts_total gauge
 finance_debts_total {debt_count}
 """
+        # Per-category and per-trip series, which is what makes this useful on a
+        # dashboard rather than just a heartbeat.
+        if by_category:
+            metrics += (
+                '# HELP finance_expense_by_category Rupiah spent per category\n'
+                '# TYPE finance_expense_by_category gauge\n'
+            )
+            for name, amount in by_category:
+                safe = str(name).replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+                metrics += f'finance_expense_by_category{{category="{safe}"}} {amount or 0}\n'
+
+        if active_trips:
+            metrics += (
+                '# HELP finance_trip_expense_total Rupiah spent per active trip\n'
+                '# TYPE finance_trip_expense_total gauge\n'
+            )
+            for trip_id, trip_name, amount in active_trips:
+                safe = str(trip_name).replace('\\', '\\\\').replace('"', '\\"').replace('\n', ' ')
+                metrics += (
+                    f'finance_trip_expense_total{{trip="{safe}",id="{trip_id}"}} {amount or 0}\n'
+                )
+
         return metrics, 200, {'Content-Type': 'text/plain; charset=utf-8'}
     
     except Exception as e:
@@ -710,9 +725,18 @@ finance_debts_total {debt_count}
 def alert_whatsapp_secure():
     """Receive Prometheus alerts with authentication"""
     try:
-        # Verify secret header
-        webhook_secret = request.headers.get('X-Alert-Secret')
-        if webhook_secret != 'alert-secret-2026-finance':
+        # Secret from the environment: this file lives in a public repository, so
+        # a literal here would publish it. Alertmanager 0.25 cannot send custom
+        # headers, so it authenticates with Basic auth and the password carries
+        # the secret; the X-Alert-Secret header is still accepted for anything
+        # that can set headers. With no secret configured the endpoint refuses
+        # rather than accepting a guessable default.
+        expected = os.environ.get('ALERT_WEBHOOK_SECRET')
+        supplied = request.headers.get('X-Alert-Secret')
+        if not supplied:
+            auth = request.authorization
+            supplied = auth.password if auth else None
+        if not expected or supplied != expected:
             return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
         
         data = request.get_json()
@@ -738,12 +762,18 @@ def alert_whatsapp_secure():
         
         if messages:
             alert_msg = "\n\n".join(messages)
-            import subprocess
-            subprocess.run(
-                f'hermes send --to whatsapp:62895397133738 "{alert_msg}"',
-                shell=True, capture_output=True
-            )
-        
+            # No shell: alert text comes from outside and would otherwise be
+            # interpreted as a command. A list argv passes it as plain data.
+            target = os.environ.get('ALERT_WHATSAPP_TO', 'whatsapp:62895397133738')
+            try:
+                subprocess.run(
+                    ['hermes', 'send', '--to', target, alert_msg],
+                    capture_output=True, timeout=30
+                )
+            except Exception:
+                # Alert delivery failing must not turn into a 500 for the caller.
+                pass
+
         return jsonify({'status': 'success', 'alerts_processed': len(alerts)})
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
@@ -755,7 +785,9 @@ def alert_whatsapp_secure():
 
 from flask_caching import Cache
 
-cache = Cache(app, config={'CACHE_TYPE': 'simple'})
+# CACHE_TYPE='simple' is an alias dropped in flask-caching 2.5.0; naming the class
+# outright works across versions and avoids the ImportStringError.
+cache = Cache(app, config={'CACHE_TYPE': 'SimpleCache'})
 
 # Cache decorators for common endpoints
 @app.route('/api/balance/cached', methods=['GET'])
@@ -827,7 +859,6 @@ def get_categories_cached():
 # ─────────────────────────────────────────────
 
 from ocr_processor import ReceiptOCR
-import os
 from werkzeug.utils import secure_filename
 
 UPLOAD_DIR = '/tmp/receipts'
@@ -942,4 +973,21 @@ def create_transaction_from_receipt():
     
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ─────────────────────────────────────────────
+# Entry Point
+# ─────────────────────────────────────────────
+
+if __name__ == '__main__':
+    print("🚀 Finance Tracker API Server")
+    print("📊 Running on http://127.0.0.1:5000")
+    print("📍 Endpoints:")
+    for rule in sorted(app.url_map.iter_rules(), key=lambda r: str(r)):
+        if rule.endpoint != 'static':
+            methods = ','.join(sorted(m for m in rule.methods if m not in ('HEAD', 'OPTIONS')))
+            print(f"   {methods:8s} {rule}")
+    print("")
+
+    app.run(host='127.0.0.1', port=5000, debug=False)
 
