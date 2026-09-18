@@ -561,9 +561,21 @@ class FinanceTracker:
                     remaining = remaining.replace('spay', '').strip()
                     break
                     
-        # Bersihkan kata sambung
-        remaining = re.sub(r'\b(?:di|ke|masuk|dompet)\b', '', remaining).strip()
-        remaining = re.sub(r'\s+', ' ', remaining)
+        # Buang kata pengisi, TAPI jangan buang preposisi tunggal "di"/"ke":
+        # "grab car stasiun ke terminal" kehilangan arah rutenya kalau "ke"
+        # dihapus, dan "makan di restoran padang" jadi tidak terbaca. Frasa
+        # "masuk dompet" tetap dibuang karena itu murni keterangan tujuan dana.
+        remaining = re.sub(r'\b(?:masuk|ke)\s+dompet\b', '', remaining)
+        # Keterangan harga yang menempel di akhir kalimat ("seharga 31.000",
+        # "totalnya 40.000") bukan bagian dari deskripsi pengeluaran.
+        remaining = re.sub(
+            r'\b(?:seharga|sebesar|sejumlah|senilai|harganya|totalnya|total)\b',
+            '', remaining)
+        remaining = re.sub(r'\s+', ' ', remaining).strip()
+        # Kalau penyaringan menyisakan deskripsi kosong, pakai teks aslinya
+        # supaya transaksi tidak pernah tercatat tanpa keterangan.
+        if not remaining:
+            remaining = re.sub(r'\b(?:seharga|sebesar|totalnya|total)\b', '', text).strip()
         
         # Deteksi tipe (income/expense) - comprehensive Indonesian keywords
         income_keywords = [

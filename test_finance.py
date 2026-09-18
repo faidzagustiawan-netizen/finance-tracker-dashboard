@@ -75,6 +75,38 @@ class AmountParsingTest(unittest.TestCase):
         self.assertEqual(parsed['description'],
                          'makan siang gulai depan stasiun pasarturi')
 
+    def test_description_keeps_route_preposition(self):
+        # "ke" carries the route meaning: "stasiun ke terminal" is not the same
+        # trip as "stasiun terminal", and dropping it produced descriptions that
+        # read like a different journey.
+        parsed = self.t.parse_transaction_input(
+            'grab car stasiun ke terminal seharga 31.000')
+        self.assertEqual(parsed['description'], 'grab car stasiun ke terminal')
+        self.assertEqual(parsed['amount'], 31000)
+
+    def test_description_keeps_di(self):
+        parsed = self.t.parse_transaction_input('makan di restoran padang 55.000')
+        self.assertEqual(parsed['description'], 'makan di restoran padang')
+
+    def test_price_words_stripped(self):
+        for text in ('makan siang gulai depan stasiun pasarturi totalnya 40.000',
+                     'nasi padang seharga 25.000',
+                     'tiket bus senilai 120.000',
+                     'hotel sebesar 350.000'):
+            with self.subTest(text=text):
+                desc = self.t.parse_transaction_input(text)['description']
+                for word in ('seharga', 'sebesar', 'senilai', 'totalnya'):
+                    self.assertNotIn(word, desc)
+
+    def test_description_never_empty(self):
+        # Even when every word is filler, a transaction must keep a description.
+        parsed = self.t.parse_transaction_input('masuk dompet seharga 20.000')
+        self.assertTrue(parsed['description'].strip())
+
+    def test_masuk_dompet_still_stripped(self):
+        parsed = self.t.parse_transaction_input('transport masuk dompet 20.000')
+        self.assertEqual(parsed['description'], 'transport')
+
 
 class TripTest(unittest.TestCase):
 
