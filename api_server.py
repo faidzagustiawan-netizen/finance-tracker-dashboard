@@ -597,6 +597,59 @@ def handle_whatsapp_voice():
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 # ─────────────────────────────────────────────
+# Trip companions - restricted WhatsApp logging
+# ─────────────────────────────────────────────
+
+# Companions travelling with the owner can log trip expenses over WhatsApp.
+# They are NOT on WHATSAPP_ALLOWED_USERS, because that allowlist grants the
+# Hermes agent (and a shell on this host); this endpoint is the entire surface
+# they get. All policy lives in trip_bot.TripWhatsAppBot, which only knows how
+# to append an expense to one trip and read that trip's total.
+
+_TRIP_BOT = None
+
+
+def _trip_bot():
+    """Build the trip bot lazily so a config error cannot stop the API booting."""
+    global _TRIP_BOT
+    if _TRIP_BOT is None:
+        from trip_bot import TripWhatsAppBot
+        _TRIP_BOT = TripWhatsAppBot(
+            "finance.db",
+            trip_ref=os.environ.get('TRIP_REF', 'padang'),
+        )
+    return _TRIP_BOT
+
+
+@app.route('/api/trip/wa', methods=['POST'])
+def trip_whatsapp():
+    """
+    Handle one message from a trip companion.
+
+    The shared secret matches the one already used by the voice webhook, since
+    both are called by the same local bridge. An unset secret refuses every
+    request rather than allowing them through.
+    """
+    expected = os.environ.get('TRIP_WEBHOOK_SECRET') or os.environ.get('ALERT_WEBHOOK_SECRET')
+    supplied = request.headers.get('X-Webhook-Secret') or request.headers.get('X-Alert-Secret')
+    if not expected or supplied != expected:
+        return jsonify({'status': 'error', 'message': 'Unauthorized'}), 401
+
+    data = request.get_json(silent=True) or {}
+    sender = data.get('sender') or ''
+    message = data.get('message') or ''
+
+    try:
+        reply = _trip_bot().handle(sender, message)
+    except Exception as e:
+        # Never leak an internal traceback to a companion's chat.
+        print(f"[trip/wa] error: {e}")
+        return jsonify({'status': 'error', 'message': 'internal error'}), 500
+
+    return jsonify({'status': 'success', 'reply': reply})
+
+
+# ─────────────────────────────────────────────
 # Monitoring Alerts - WhatsApp Webhook
 # ─────────────────────────────────────────────
 
