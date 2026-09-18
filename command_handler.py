@@ -392,10 +392,20 @@ class FinanceCommandHandler:
 
     @staticmethod
     def _trip_days(trip: Dict) -> int:
+        """
+        Days to divide the total by.
+
+        For a finished trip that is its real length. For a running one it is the
+        days elapsed so far, so the figure reads as an actual burn rate ("we are
+        spending X per day") instead of being diluted by days that have not
+        happened yet -- day one would otherwise report a fantasy average.
+        """
         try:
             start = datetime.strptime(trip['start_date'], "%Y-%m-%d")
-            end_str = trip['end_date'] or datetime.now().strftime("%Y-%m-%d")
-            end = datetime.strptime(end_str, "%Y-%m-%d")
+            if trip['status'] == 'done' and trip['end_date']:
+                end = datetime.strptime(trip['end_date'], "%Y-%m-%d")
+            else:
+                end = datetime.now()
             return max((end - start).days + 1, 1)
         except Exception:
             return 0
