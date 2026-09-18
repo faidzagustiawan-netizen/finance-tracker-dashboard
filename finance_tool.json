@@ -1,0 +1,17 @@
+{
+  "type": "function",
+  "function": {
+    "name": "finance_tracker",
+    "description": "Track personal finances: expenses, income, debts. Commands: /expenses, /income, /debts, /balance, /categories, /help. Or use natural language: 'jajan 25rb', 'gajian 5jt', 'hutang ke budi 100rb'",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "command": {
+          "type": "string",
+          "description": "Finance command or natural language. Examples: '/expenses', '/income', '/debts', '/balance', '/categories', '/help', 'jajan 25rb', 'hutang ke budi 100rb'"
+        }
+      },
+      "required": ["command"]
+    }
+  }
+}

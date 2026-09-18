@@ -1,7 +1,7 @@
 import re
 from datetime import datetime
 from finance_tracker import FinanceTracker
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 
 class FinanceCommandHandler:
     def __init__(self, db_path: str = "finance.db"):
@@ -38,6 +38,8 @@ class FinanceCommandHandler:
             return self.cmd_all_debts()
         elif command == '/debt':
             return self.cmd_friend_debt(args)
+        elif command in ('/trip', '/trips', '/perjalanan'):
+            return self.cmd_trip(args)
         elif command == '/categories':
             return self.cmd_categories()
         elif command == '/help':
@@ -117,16 +119,22 @@ class FinanceCommandHandler:
                 }
             
             try:
+                # Anything spent while a trip is running is part of that trip,
+                # so the traveller never has to remember to tag it.
+                trip = self.tracker.get_active_trip()
+                trip_id = trip['id'] if trip else None
+
                 success = self.tracker.add_expense(
                     amount=amount,
                     category=category,
                     description=description,
                     account_id=account_id,
-                    date=datetime.now().strftime("%Y-%m-%d")
+                    date=datetime.now().strftime("%Y-%m-%d"),
+                    trip_id=trip_id
                 )
                 
                 if success:
-                    return f"✅ Pengeluaran dicatat: Rp {amount:,} ({category})"
+                    return self._expense_reply(amount, category, description, account_id, trip)
                 else:
                     return "❌ Gagal mencatat pengeluaran"
             except Exception as e:
@@ -257,7 +265,141 @@ class FinanceCommandHandler:
         return None
     
     # ==================== COMMANDS ====================
-    
+
+    def _expense_reply(self, amount: int, category: str, description: str,
+                       account_id, trip) -> str:
+        """
+        Reply for a recorded expense.
+
+        The user explicitly asked for a short confirmation plus the running
+        balance, not a transaction list: "tidak perlu memberikan transactions
+        seperti ini setiap ada transaksi baru, cukup update balance saja".
+        The trip line is added only while a trip is running, because during the
+        trip that running total is the number that matters.
+        """
+        accounts = {a['id']: a['name'] for a in self.tracker.get_accounts()}
+        account_name = accounts.get(account_id, 'Cash') if account_id else 'Cash'
+
+        balance = self.tracker.get_balance()
+
+        lines = [
+            f"✅ Tercatat: {description or category} — Rp {amount:,}",
+            f"📁 {category} · {account_name}",
+        ]
+        if trip:
+            summary = self.tracker.get_trip_summary(trip['id'])
+            lines.append(
+                f"🧳 {trip['name']}: Rp {summary['total']:,} "
+                f"({summary['expense_count']} pengeluaran)"
+            )
+        lines.append(f"💰 Saldo bulan ini: Rp {balance['balance']:,}")
+        return "\n".join(lines)
+
+    def cmd_trip(self, args: list) -> str:
+        """
+        /trip            - ringkasan trip aktif
+        /trip list       - semua trip
+        /trip <nama>     - ringkasan trip tertentu
+        /trip mulai <nama>   - mulai trip baru
+        /trip selesai    - tutup trip aktif
+        """
+        if not args:
+            trip = self.tracker.get_active_trip()
+            if not trip:
+                return ("🧳 Tidak ada trip aktif.\n\n"
+                        "Mulai dengan: `/trip mulai Padang`")
+            return self._trip_summary_text(trip, verbose=True)
+
+        sub = args[0].lower()
+
+        if sub in ('list', 'daftar'):
+            trips = self.tracker.list_trips()
+            if not trips:
+                return "🧳 Belum ada trip."
+            msg = "🧳 **DAFTAR TRIP**\n"
+            for t in trips:
+                mark = '🟢' if t['status'] == 'active' else '⚪'
+                msg += (f"\n{mark} {t['name']} ({t['start_date']}"
+                        f"{' → ' + t['end_date'] if t['end_date'] else ''})\n"
+                        f"   Rp {t['total']:,} · {t['n']} pengeluaran")
+            return msg
+
+        if sub in ('mulai', 'start', 'baru'):
+            name = " ".join(args[1:]).strip()
+            if not name:
+                return "❌ Contoh: `/trip mulai Padang`"
+            existing = self.tracker.get_active_trip()
+            if existing:
+                self.tracker.end_trip(existing['slug'])
+            trip_id = self.tracker.create_trip(name)
+            if trip_id is None:
+                return f"❌ Trip '{name}' sudah ada."
+            return (f"🧳 Trip dimulai: **{name}**\n"
+                    f"Semua pengeluaran otomatis masuk ke trip ini sampai "
+                    f"kamu ketik `/trip selesai`.")
+
+        if sub in ('selesai', 'end', 'stop', 'tutup'):
+            trip = self.tracker.get_active_trip()
+            if not trip:
+                return "❌ Tidak ada trip aktif."
+            self.tracker.end_trip(trip['slug'])
+            return ("🧳 Trip ditutup.\n\n"
+                    + self._trip_summary_text(trip, verbose=True))
+
+        # Otherwise treat the argument as a trip name
+        trip = self.tracker.get_trip(" ".join(args))
+        if not trip:
+            return f"❌ Trip '{' '.join(args)}' tidak ditemukan."
+        return self._trip_summary_text(trip, verbose=True)
+
+    def _trip_summary_text(self, trip: Dict, verbose: bool = False) -> str:
+        summary = self.tracker.get_trip_summary(trip['id'])
+
+        msg = f"🧳 **{trip['name'].upper()}**\n"
+        msg += f"{trip['start_date']}"
+        msg += f" → {trip['end_date']}" if trip['end_date'] else " → sekarang"
+        if trip['status'] == 'done':
+            msg += " (selesai)"
+        msg += "\n"
+
+        if summary['expense_count'] == 0:
+            return msg + "\nBelum ada pengeluaran."
+
+        msg += f"\nTotal: Rp {summary['total']:,}"
+        days = self._trip_days(trip)
+        if days > 0:
+            msg += f"\nRata-rata: Rp {summary['total'] // days:,}/hari ({days} hari)"
+
+        if trip.get('budget'):
+            left = trip['budget'] - summary['total']
+            pct = summary['total'] / trip['budget'] * 100
+            msg += (f"\nBudget: Rp {trip['budget']:,} ({pct:.0f}% terpakai)"
+                    f"\nSisa: Rp {left:,} {'✅' if left >= 0 else '⚠️ over'}")
+
+        msg += "\n\n**Per kategori**\n"
+        for c in summary['by_category']:
+            pct = c['total'] / summary['total'] * 100
+            msg += f"• {c['name'] or 'Lainnya'}: Rp {c['total']:,} ({pct:.0f}%)\n"
+
+        if verbose:
+            msg += "\n**Pengeluaran**\n"
+            for it in summary['items'][:15]:
+                msg += f"• {it['date']} — {it['description'] or it['category']}: Rp {it['amount']:,}\n"
+            if len(summary['items']) > 15:
+                msg += f"…dan {len(summary['items']) - 15} lainnya\n"
+
+        return msg
+
+    @staticmethod
+    def _trip_days(trip: Dict) -> int:
+        try:
+            start = datetime.strptime(trip['start_date'], "%Y-%m-%d")
+            end_str = trip['end_date'] or datetime.now().strftime("%Y-%m-%d")
+            end = datetime.strptime(end_str, "%Y-%m-%d")
+            return max((end - start).days + 1, 1)
+        except Exception:
+            return 0
+
     def cmd_balance(self) -> str:
         """/balance - Lihat balance bulan ini"""
         balance = self.tracker.get_balance()
@@ -390,17 +532,23 @@ Balance: Rp {balance['balance']:,} {'✅' if balance['balance'] >= 0 else '⚠�
         return """📖 **BANTUAN FINANCE TRACKER**
 
 **Format Natural (tanpa slash):**
-• _Pengeluaran:_ "25rb makanan" / "jajan 50k"
+• _Pengeluaran:_ "makan 40.000" / "jajan 25rb" / "ojek 25.000 gopay"
 • _Pemasukan:_ "gajian 5jt" / "freelance 500rb"
 • _Hutang:_ "hutang ke budi 100rb" / "budi hutang ke saya 50rb"
 
 **Commands:**
 • /balance - Balance bulan ini
 • /expenses [bulan] - Pengeluaran per kategori (contoh: /expenses 2026-08)
+• /trip - Ringkasan trip yang sedang berjalan
+• /trip list - Daftar semua trip
+• /trip mulai <nama> - Mulai trip baru
+• /trip selesai - Tutup trip yang berjalan
 • /debts - Semua hutang/piutang
 • /debt [nama] - Hutang/piutang dengan teman tertentu
 • /categories - Lihat daftar kategori
 • /help - Bantuan ini
 
 **Format Tanggal:** YYYY-MM-DD
-**Format Uang:** 25rb, 50k, 1jt, 2juta"""
+**Format Uang:** 40000, 40.000, 40rb, 40ribu, 40k, 1jt, 2 juta
+
+ℹ️ Selama trip aktif, semua pengeluaran otomatis masuk ke trip itu."""
